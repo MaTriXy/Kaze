@@ -198,8 +198,19 @@ class WhisperModelManager: ObservableObject {
         modelSizeOnDiskCached = ""
     }
 
+    /// Releases the loaded Whisper runtime from memory while keeping files on disk.
+    func unloadModelFromMemory() {
+        whisperKit = nil
+        if case .ready = state {
+            state = .downloaded
+        }
+    }
+
     /// The cached WhisperKit instance, if loaded.
     var loadedKit: WhisperKit? { whisperKit }
+
+    /// Whether a loaded runtime instance is available.
+    var isLoaded: Bool { whisperKit != nil }
 
     /// Size of the currently selected model on disk (cached, not computed on every view redraw).
     var modelSizeOnDisk: String { modelSizeOnDiskCached }
@@ -254,6 +265,7 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
     private let bufferQueue = DispatchQueue(label: "com.kaze.whisper.audioBuffer")
     private var _audioBuffer: [Float] = []
     private var _inputSampleRate: Double = 16000
+    private var transcriptionTask: Task<Void, Never>?
 
     /// Maximum recording duration in seconds (prevents unbounded memory growth).
     private static let maxRecordingSeconds: Double = 300 // 5 minutes
@@ -264,6 +276,10 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
         self.modelManager = modelManager
     }
 
+    deinit {
+        transcriptionTask?.cancel()
+    }
+
     func requestPermissions() async -> Bool {
         // Whisper only needs microphone access (no SFSpeechRecognizer authorization needed)
         let micStatus = await AVCaptureDevice.requestAccess(for: .audio)
@@ -272,6 +288,8 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
 
     func startRecording() {
         guard !isRecording else { return }
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
 
         // Reset buffer with pre-allocation (Fix #3: avoid repeated reallocations)
         bufferQueue.sync {
@@ -327,6 +345,8 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             isRecording = true
         } catch {
             print("WhisperTranscriber: Failed to start recording: \(error)")
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isRecording = false
         }
     }
 
@@ -352,14 +372,17 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             return
         }
 
-        Task {
-            await transcribeAudio(capturedAudio, inputSampleRate: sampleRate)
+        transcriptionTask?.cancel()
+        transcriptionTask = Task { [weak self] in
+            await self?.transcribeAudio(capturedAudio, inputSampleRate: sampleRate)
         }
     }
 
     private func transcribeAudio(_ samples: [Float], inputSampleRate: Double) async {
+        guard !Task.isCancelled else { return }
         do {
             let kit = try await modelManager.loadModel()
+            guard !Task.isCancelled else { return }
 
             let targetSampleRate = Double(WhisperKit.sampleRate) // 16000
 
@@ -372,6 +395,7 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             } else {
                 audioForWhisper = samples
             }
+            guard !Task.isCancelled else { return }
 
             // Build decoding options with custom vocabulary as initial prompt
             var decodeOptions = DecodingOptions()
@@ -382,11 +406,13 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             }
 
             let results: [TranscriptionResult] = try await kit.transcribe(audioArray: audioForWhisper, decodeOptions: decodeOptions)
+            guard !Task.isCancelled else { return }
             let text = results.compactMap { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 
             transcribedText = text
             onTranscriptionFinished?(text)
         } catch {
+            guard !Task.isCancelled else { return }
             print("WhisperTranscriber: Transcription failed: \(error)")
             onTranscriptionFinished?("")
         }

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import CoreAudio
+import Combine
 
 enum TranscriptionEngine: String, CaseIterable, Identifiable {
     case dictation
@@ -128,6 +129,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayWindow = RecordingOverlayWindow()
     private let overlayState = OverlayState()
     private var statusItem: NSStatusItem?
+    private var cancellables = Set<AnyCancellable>()
 
     private var enhancer: TextEnhancer?
     private var settingsWindowController: NSWindowController?
@@ -175,6 +177,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hotkeyModeObserver: NSObjectProtocol?
     private var isSessionActive = false
+    private var idleModelUnloadTask: Task<Void, Never>?
+    private var observedEngineForPreferenceChanges: TranscriptionEngine?
+    private static let modelUnloadIdleDelay: Duration = .seconds(90)
 
     /// Returns the currently active transcriber based on the user's engine preference.
     private var activeTranscriber: (any TranscriberProtocol)? {
@@ -225,6 +230,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.accessibilityDescription = "Kaze"
         }
         buildMenu()
+        observedEngineForPreferenceChanges = transcriptionEngine
+        observeModelState()
+        updateStatusItemIndicator()
 
         Task {
             let granted = await speechTranscriber.requestPermissions()
@@ -254,6 +262,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Kaze", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
+    }
+
+    private func observeModelState() {
+        whisperModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+
+        parakeetModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+
+        qwenModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+    }
+
+    private func updateStatusItemIndicator() {
+        guard let statusItem, let button = statusItem.button else { return }
+        let runtimesLoaded = whisperModelManager.isLoaded || parakeetModelManager.isLoaded || qwenModelManager.isLoaded
+        let shouldMuteIcon = !isSessionActive && !runtimesLoaded
+
+        statusItem.length = NSStatusItem.squareLength
+        button.attributedTitle = NSAttributedString(string: "")
+        button.alphaValue = shouldMuteIcon ? 0.45 : 1.0
+        button.contentTintColor = shouldMuteIcon ? NSColor.tertiaryLabelColor : nil
     }
 
     @objc private func openSettings() {
@@ -323,12 +359,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.hotkeyManager.shortcut != newShortcut {
                     self.hotkeyManager.shortcut = newShortcut
                 }
+
+                self.handleEnginePreferenceChange()
             }
         }
+
     }
 
     private func beginRecording() {
         guard !isSessionActive else { return }
+        idleModelUnloadTask?.cancel()
+        idleModelUnloadTask = nil
 
         let engine = transcriptionEngine
 
@@ -338,6 +379,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         isSessionActive = true
+        updateStatusItemIndicator()
 
         // Pass current custom words and selected microphone to the transcriber
         let words = customWordsManager.words
@@ -431,6 +473,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     self?.overlayWindow.hide(state: self?.overlayState)
                     self?.isSessionActive = false
+                    self?.updateStatusItemIndicator()
+                    self?.scheduleIdleModelUnload()
                 }
             }
         }
@@ -443,6 +487,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !rawText.isEmpty else {
             overlayWindow.hide(state: overlayState)
             isSessionActive = false
+            updateStatusItemIndicator()
+            scheduleIdleModelUnload()
             return
         }
 
@@ -457,6 +503,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.setEnhancingState(false)
                     self.overlayWindow.hide(state: self.overlayState)
                     self.isSessionActive = false
+                    self.updateStatusItemIndicator()
+                    self.scheduleIdleModelUnload()
                 }
                 do {
                     if #available(macOS 26.0, *) {
@@ -493,7 +541,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
             overlayWindow.hide(state: overlayState)
             isSessionActive = false
+            updateStatusItemIndicator()
+            scheduleIdleModelUnload()
         }
+    }
+
+    private func handleEnginePreferenceChange() {
+        let currentEngine = transcriptionEngine
+        if observedEngineForPreferenceChanges == nil {
+            observedEngineForPreferenceChanges = currentEngine
+        }
+        guard observedEngineForPreferenceChanges != currentEngine else { return }
+        observedEngineForPreferenceChanges = currentEngine
+        guard !isSessionActive else { return }
+        scheduleIdleModelUnload()
+    }
+
+    private func scheduleIdleModelUnload() {
+        idleModelUnloadTask?.cancel()
+        idleModelUnloadTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.modelUnloadIdleDelay)
+            await MainActor.run {
+                guard let self else { return }
+                guard !self.isSessionActive else { return }
+                self.unloadModelRuntimesFromMemory()
+            }
+        }
+    }
+
+    private func unloadModelRuntimesFromMemory() {
+        whisperModelManager.unloadModelFromMemory()
+        parakeetModelManager.unloadModelFromMemory()
+        qwenModelManager.unloadModelFromMemory()
+        whisperTranscriber = nil
+        fluidAudioTranscriber = nil
+        updateStatusItemIndicator()
     }
 
     private func setEnhancingState(_ enhancing: Bool) {
@@ -539,6 +621,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func quit() {
         hotkeyManager.stop()
         NSApp.terminate(nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        idleModelUnloadTask?.cancel()
+        hotkeyManager.stop()
+        cancellables.removeAll()
+        if let hotkeyModeObserver {
+            NotificationCenter.default.removeObserver(hotkeyModeObserver)
+            self.hotkeyModeObserver = nil
+        }
     }
 
     private func showPermissionAlert() {

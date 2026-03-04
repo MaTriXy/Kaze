@@ -372,10 +372,15 @@ private struct GeneralSettingsView: View {
             guard AudioObjectGetPropertyDataSize(deviceID, &inputAddress, 0, nil, &inputSize) == noErr,
                   inputSize > 0 else { continue }
 
-            let bufferListPtr = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-            defer { bufferListPtr.deallocate() }
-            guard AudioObjectGetPropertyData(deviceID, &inputAddress, 0, nil, &inputSize, bufferListPtr) == noErr else { continue }
+            let rawBuffer = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(inputSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { rawBuffer.deallocate() }
 
+            guard AudioObjectGetPropertyData(deviceID, &inputAddress, 0, nil, &inputSize, rawBuffer) == noErr else { continue }
+
+            let bufferListPtr = rawBuffer.assumingMemoryBound(to: AudioBufferList.self)
             let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPtr)
             let inputChannels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
             guard inputChannels > 0 else { continue }

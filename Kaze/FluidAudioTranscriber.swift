@@ -204,6 +204,15 @@ class FluidAudioModelManager: ObservableObject {
         modelSizeOnDiskCached = ""
     }
 
+    /// Releases the loaded runtime from memory while keeping files on disk.
+    func unloadModelFromMemory() {
+        parakeetManager = nil
+        qwen3Manager = nil
+        if case .ready = state {
+            state = .downloaded
+        }
+    }
+
     /// Size of the model on disk (cached, not computed on every view redraw).
     var modelSizeOnDisk: String { modelSizeOnDiskCached }
 
@@ -276,6 +285,7 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
     private let bufferQueue = DispatchQueue(label: "com.kaze.fluidaudio.audioBuffer")
     private var _audioBuffer: [Float] = []
     private var _inputSampleRate: Double = 16000
+    private var transcriptionTask: Task<Void, Never>?
 
     /// Maximum recording duration in seconds.
     private static let maxRecordingSeconds: Double = 300 // 5 minutes
@@ -286,6 +296,10 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
         self.modelManager = modelManager
     }
 
+    deinit {
+        transcriptionTask?.cancel()
+    }
+
     func requestPermissions() async -> Bool {
         let micStatus = await AVCaptureDevice.requestAccess(for: .audio)
         return micStatus
@@ -293,6 +307,8 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
 
     func startRecording() {
         guard !isRecording else { return }
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
 
         // Reset buffer with pre-allocation
         bufferQueue.sync {
@@ -346,6 +362,8 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
             isRecording = true
         } catch {
             print("FluidAudioTranscriber: Failed to start recording: \(error)")
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isRecording = false
         }
     }
 
@@ -371,25 +389,30 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
             return
         }
 
-        Task {
-            await transcribeAudio(capturedAudio, sampleRate: sampleRate)
+        transcriptionTask?.cancel()
+        transcriptionTask = Task { [weak self] in
+            await self?.transcribeAudio(capturedAudio, sampleRate: sampleRate)
         }
     }
 
     private func transcribeAudio(_ samples: [Float], sampleRate: Double) async {
+        guard !Task.isCancelled else { return }
         do {
             // Ensure model is loaded
             try await modelManager.loadModel()
+            guard !Task.isCancelled else { return }
 
             // Write audio to a temporary WAV file (FluidAudio/Parakeet needs a file URL)
             let tempURL = try writeWAVFile(samples: samples, sampleRate: sampleRate)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
             let text = try await modelManager.transcribe(audioURL: tempURL)
+            guard !Task.isCancelled else { return }
 
             transcribedText = text
             onTranscriptionFinished?(text)
         } catch {
+            guard !Task.isCancelled else { return }
             print("FluidAudioTranscriber: Transcription failed: \(error)")
             onTranscriptionFinished?("")
         }
