@@ -99,6 +99,7 @@ class WhisperModelManager: ObservableObject {
 
     private var whisperKit: WhisperKit?
     private var loadTask: Task<WhisperKit, any Error>?
+    private var downloadTask: Task<Void, Never>?
 
     init() {
         let raw = UserDefaults.standard.string(forKey: AppPreferenceKey.whisperModelVariant)
@@ -141,24 +142,43 @@ class WhisperModelManager: ObservableObject {
 
         state = .downloading(progress: 0)
 
-        do {
-            let modelFolder = try await WhisperKit.download(
-                variant: selectedVariant.whisperKitVariant,
-                downloadBase: modelDirectory,
-                progressCallback: { [weak self] progress in
-                    Task { @MainActor [weak self] in
-                        self?.state = .downloading(progress: progress.fractionCompleted)
+        let task = Task {
+            do {
+                let modelFolder = try await WhisperKit.download(
+                    variant: selectedVariant.whisperKitVariant,
+                    downloadBase: modelDirectory,
+                    progressCallback: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            guard let self, !Task.isCancelled else { return }
+                            self.state = .downloading(progress: progress.fractionCompleted)
+                        }
                     }
-                }
-            )
+                )
+                guard !Task.isCancelled else { return }
 
-            // Store the path for this variant
-            UserDefaults.standard.set(modelFolder.path, forKey: modelPathKey)
-            state = .downloaded
-            refreshModelSizeOnDisk()
-        } catch {
-            state = .error("Download failed: \(error.localizedDescription)")
+                // Store the path for this variant
+                UserDefaults.standard.set(modelFolder.path, forKey: modelPathKey)
+                state = .downloaded
+                refreshModelSizeOnDisk()
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error("Download failed: \(error.localizedDescription)")
+            }
         }
+        downloadTask = task
+        await task.value
+        downloadTask = nil
+    }
+
+    /// Cancels an in-progress download and resets to not-downloaded state.
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        // Clean up any partial files
+        try? FileManager.default.removeItem(at: modelDirectory)
+        UserDefaults.standard.removeObject(forKey: modelPathKey)
+        state = .notDownloaded
+        modelSizeOnDiskCached = ""
     }
 
     /// Initializes WhisperKit with the downloaded model. Returns the ready instance.

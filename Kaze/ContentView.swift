@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import CoreAudio
+import Combine
+import ServiceManagement
 
 // MARK: - Settings Tab Enum
 
@@ -111,6 +113,7 @@ private struct GeneralSettingsView: View {
     @State private var hotkeyMonitor: Any?
     @State private var recordedModifiersUnion: HotkeyShortcut.Modifiers = []
     @State private var availableMicrophones: [(id: String, name: String)] = []
+    @StateObject private var audioDeviceObserver = AudioDeviceObserver()
 
     @ObservedObject var whisperModelManager: WhisperModelManager
     @ObservedObject var parakeetModelManager: FluidAudioModelManager
@@ -330,16 +333,45 @@ private struct GeneralSettingsView: View {
                     .controlSize(.small)
                 }
 
+                sectionDivider()
+
+                // MARK: System
+                formRow("Launch at login:") {
+                    Toggle(isOn: Binding(
+                        get: { SMAppService.mainApp.status == .enabled },
+                        set: { newValue in
+                            do {
+                                if newValue {
+                                    try SMAppService.mainApp.register()
+                                } else {
+                                    try SMAppService.mainApp.unregister()
+                                }
+                            } catch {
+                                print("Launch at login toggle failed: \(error)")
+                            }
+                        }
+                    )) {
+                        Text("Start Kaze when you log in")
+                    }
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+
                 Spacer(minLength: 20)
             }
             .padding(.top, 12)
         }
         .onDisappear {
             stopHotkeyRecording()
+            audioDeviceObserver.stop()
         }
         .onAppear {
             hotkeyShortcut = HotkeyShortcut.loadFromDefaults()
             availableMicrophones = Self.listInputDevices()
+            audioDeviceObserver.onChange = {
+                availableMicrophones = Self.listInputDevices()
+            }
+            audioDeviceObserver.start()
         }
     }
 
@@ -433,6 +465,10 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                Button("Cancel", role: .destructive) {
+                    whisperModelManager.cancelDownload()
+                }
+                .controlSize(.small)
             }
 
         case .downloaded:
@@ -553,6 +589,10 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
+                Button("Cancel", role: .destructive) {
+                    manager.cancelDownload()
+                }
+                .controlSize(.small)
             }
 
         case .downloaded:
@@ -687,6 +727,8 @@ private struct GeneralSettingsView: View {
             self.hotkeyMonitor = nil
         }
     }
+
+
 }
 
 // MARK: - History Tab
@@ -910,6 +952,56 @@ private struct VocabularySettingsView: View {
     }
 }
 
+// MARK: - Audio Device Observer
+
+/// Observes Core Audio device list changes and calls `onChange` on the main thread.
+class AudioDeviceObserver: ObservableObject {
+    @Published private var _tick = false
+    var onChange: (() -> Void)?
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+
+    func start() {
+        guard listenerBlock == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onChange?()
+        }
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            DispatchQueue.main,
+            block
+        )
+        if status == noErr {
+            listenerBlock = block
+        }
+    }
+
+    func stop() {
+        guard let block = listenerBlock else { return }
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            DispatchQueue.main,
+            block
+        )
+        listenerBlock = nil
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 // MARK: - Shared Form Helpers
 
 private let formLabelWidth: CGFloat = 140
@@ -932,6 +1024,64 @@ private func sectionDivider() -> some View {
     Divider()
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+}
+
+// MARK: - About View
+
+struct AboutView: View {
+    private let appVersion: String = {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        return "v\(version) (\(build))"
+    }()
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if let icon = NSImage(named: "kaze-icon") {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 64, height: 64)
+            } else {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Kaze")
+                .font(.title2.bold())
+
+            Text(appVersion)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Speech-to-text, entirely on-device.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            Divider()
+                .padding(.horizontal, 40)
+
+            HStack(spacing: 16) {
+                Button("GitHub") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/fayazara/Kaze")!)
+                }
+                .controlSize(.small)
+
+                Button("Releases") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/fayazara/Kaze/releases")!)
+                }
+                .controlSize(.small)
+            }
+
+            Text("MIT License")
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+        }
+        .padding(.vertical, 20)
+        .padding(.horizontal, 40)
+        .frame(width: 300)
+    }
 }
 
 // MARK: - Key Cap View

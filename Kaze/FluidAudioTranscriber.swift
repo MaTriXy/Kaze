@@ -81,6 +81,7 @@ class FluidAudioModelManager: ObservableObject {
     private var parakeetManager: AsrManager?
     private var qwen3Manager: Qwen3AsrManager?
     private var loadTask: Task<Void, any Error>?
+    private var downloadTask: Task<Void, Never>?
 
     init(model: FluidAudioModel) {
         self.model = model
@@ -128,21 +129,36 @@ class FluidAudioModelManager: ObservableObject {
         // so we show an indeterminate progress state.
         state = .downloading(progress: -1)
 
-        do {
-            switch model {
-            case .parakeet:
-                try await AsrModels.download(version: .v3)
+        let task = Task {
+            do {
+                switch model {
+                case .parakeet:
+                    try await AsrModels.download(version: .v3)
+                case .qwen:
+                    try await Qwen3AsrModels.download()
+                }
+                guard !Task.isCancelled else { return }
                 state = .downloaded
                 refreshModelSizeOnDisk()
-
-            case .qwen:
-                try await Qwen3AsrModels.download()
-                state = .downloaded
-                refreshModelSizeOnDisk()
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error("Download failed: \(error.localizedDescription)")
             }
-        } catch {
-            state = .error("Download failed: \(error.localizedDescription)")
         }
+        downloadTask = task
+        await task.value
+        downloadTask = nil
+    }
+
+    /// Cancels an in-progress download and resets to not-downloaded state.
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        // Clean up any partial files
+        let dir = modelDirectory
+        try? FileManager.default.removeItem(at: dir)
+        state = .notDownloaded
+        modelSizeOnDiskCached = ""
     }
 
     /// Loads the model into memory, returning when ready for transcription.

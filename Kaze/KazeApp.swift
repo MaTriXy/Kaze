@@ -84,6 +84,7 @@ enum AppPreferenceKey {
     static let notchMode = "notchMode"
     static let selectedMicrophoneID = "selectedMicrophoneID"
     static let appendTrailingSpace = "appendTrailingSpace"
+    static let launchAtLogin = "launchAtLogin"
 
     static let defaultEnhancementPrompt = """
         You are Kaze, a speech-to-text transcription assistant. Your only job is to \
@@ -133,6 +134,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var enhancer: TextEnhancer?
     private var settingsWindowController: NSWindowController?
+    private var onboardingWindowController: NSWindowController?
 
     var transcriptionEngine: TranscriptionEngine {
         get {
@@ -241,6 +243,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             setupHotkey()
+
+            if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
+                showOnboarding()
+            }
         }
     }
 
@@ -256,12 +262,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         let menu = NSMenu()
 
+        let aboutItem = NSMenuItem(title: "About Kaze", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Kaze", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
+    }
+
+    private var aboutWindowController: NSWindowController?
+
+    @objc private func showAbout() {
+        if let window = aboutWindowController?.window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let aboutView = AboutView()
+        let hostingController = NSHostingController(rootView: aboutView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.center()
+        window.title = "About Kaze"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+
+        let controller = NSWindowController(window: window)
+        aboutWindowController = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.showWindow(nil)
     }
 
     private func observeModelState() {
@@ -292,6 +333,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         button.contentTintColor = shouldMuteIcon ? NSColor.tertiaryLabelColor : nil
     }
 
+    private func showOnboarding() {
+        let onboardingView = OnboardingView { [weak self] in
+            self?.onboardingWindowController?.window?.close()
+            self?.onboardingWindowController = nil
+            // Reload hotkey in case the user changed it during onboarding
+            self?.hotkeyManager.shortcut = HotkeyShortcut.loadFromDefaults()
+            self?.hotkeyManager.mode = self?.hotkeyMode ?? .holdToTalk
+        }
+        let hostingController = NSHostingController(rootView: onboardingView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Welcome to Kaze"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+
+        // Manually center on the main screen
+        if let screen = NSScreen.main {
+            let screenFrame = screen.visibleFrame
+            let windowSize = window.frame.size
+            let x = screenFrame.midX - windowSize.width / 2
+            let y = screenFrame.midY - windowSize.height / 2
+            window.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+
+        let controller = NSWindowController(window: window)
+        onboardingWindowController = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.showWindow(nil)
+    }
+
     @objc private func openSettings() {
         if let window = settingsWindowController?.window {
             NSApp.activate(ignoringOtherApps: true)
@@ -310,12 +386,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(rootView: contentView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 1800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.minSize = NSSize(width: 500, height: 400)
+        window.minSize = NSSize(width: 500, height: 500)
+        window.maxSize = NSSize(width: 500, height: 1800)
         window.center()
         window.title = "Kaze Settings"
         window.contentViewController = hostingController
@@ -600,9 +677,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if UserDefaults.standard.bool(forKey: AppPreferenceKey.appendTrailingSpace) {
             output += " "
         }
+
         let source = CGEventSource(stateID: .hidSystemState)
         let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string) ?? ""
         pasteboard.clearContents()
         pasteboard.setString(output, forType: .string)
 
@@ -614,13 +691,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         cmdDown?.post(tap: .cgAnnotatedSessionEventTap)
         cmdUp?.post(tap: .cgAnnotatedSessionEventTap)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            pasteboard.clearContents()
-            if !previous.isEmpty {
-                pasteboard.setString(previous, forType: .string)
-            }
-        }
     }
 
     @objc private func quit() {
