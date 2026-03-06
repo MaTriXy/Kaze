@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 import Combine
 import FluidAudio
 
@@ -79,6 +80,8 @@ class FluidAudioModelManager: ObservableObject {
     // Loaded runtime objects
     private var parakeetManager: AsrManager?
     private var qwen3Manager: Qwen3AsrManager?
+    private var loadTask: Task<Void, any Error>?
+    private var downloadTask: Task<Void, Never>?
 
     init(model: FluidAudioModel) {
         self.model = model
@@ -126,21 +129,36 @@ class FluidAudioModelManager: ObservableObject {
         // so we show an indeterminate progress state.
         state = .downloading(progress: -1)
 
-        do {
-            switch model {
-            case .parakeet:
-                try await AsrModels.download(version: .v3)
+        let task = Task {
+            do {
+                switch model {
+                case .parakeet:
+                    try await AsrModels.download(version: .v3)
+                case .qwen:
+                    try await Qwen3AsrModels.download()
+                }
+                guard !Task.isCancelled else { return }
                 state = .downloaded
                 refreshModelSizeOnDisk()
-
-            case .qwen:
-                try await Qwen3AsrModels.download()
-                state = .downloaded
-                refreshModelSizeOnDisk()
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error("Download failed: \(error.localizedDescription)")
             }
-        } catch {
-            state = .error("Download failed: \(error.localizedDescription)")
         }
+        downloadTask = task
+        await task.value
+        downloadTask = nil
+    }
+
+    /// Cancels an in-progress download and resets to not-downloaded state.
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        // Clean up any partial files
+        let dir = modelDirectory
+        try? FileManager.default.removeItem(at: dir)
+        state = .notDownloaded
+        modelSizeOnDiskCached = ""
     }
 
     /// Loads the model into memory, returning when ready for transcription.
@@ -150,25 +168,41 @@ class FluidAudioModelManager: ObservableObject {
             return
         }
 
-        state = .loading
-
-        switch model {
-        case .parakeet:
-            let dir = AsrModels.defaultCacheDirectory(for: .v3)
-            let asrModels = try await AsrModels.load(from: dir, version: .v3)
-            let manager = AsrManager(config: .default)
-            try await manager.initialize(models: asrModels)
-            parakeetManager = manager
-
-        case .qwen:
-            let dir = Qwen3AsrModels.defaultCacheDirectory()
-            let manager = Qwen3AsrManager()
-            try await manager.loadModels(from: dir)
-            qwen3Manager = manager
+        // If a load is already in-flight, await it instead of starting a duplicate.
+        if let existing = loadTask {
+            try await existing.value
+            return
         }
 
-        state = .ready
-        refreshModelSizeOnDisk()
+        state = .loading
+
+        let task = Task<Void, any Error> {
+            switch model {
+            case .parakeet:
+                let dir = AsrModels.defaultCacheDirectory(for: .v3)
+                let asrModels = try await AsrModels.load(from: dir, version: .v3)
+                let manager = AsrManager(config: .default)
+                try await manager.initialize(models: asrModels)
+                await MainActor.run { parakeetManager = manager }
+
+            case .qwen:
+                let dir = Qwen3AsrModels.defaultCacheDirectory()
+                let manager = Qwen3AsrManager()
+                try await manager.loadModels(from: dir)
+                await MainActor.run { qwen3Manager = manager }
+            }
+        }
+        loadTask = task
+
+        do {
+            try await task.value
+            loadTask = nil
+            state = .ready
+            refreshModelSizeOnDisk()
+        } catch {
+            loadTask = nil
+            throw error
+        }
     }
 
     /// Transcribes audio from a file URL.
@@ -201,6 +235,20 @@ class FluidAudioModelManager: ObservableObject {
         try? FileManager.default.removeItem(at: dir)
         state = .notDownloaded
         modelSizeOnDiskCached = ""
+    }
+
+    /// Releases the loaded runtime from memory while keeping files on disk.
+    func unloadModelFromMemory() {
+        loadTask?.cancel()
+        loadTask = nil
+        parakeetManager = nil
+        qwen3Manager = nil
+        switch state {
+        case .ready, .loading:
+            state = .downloaded
+        default:
+            break
+        }
     }
 
     /// Size of the model on disk (cached, not computed on every view redraw).
@@ -264,6 +312,7 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
     @Published var isEnhancing = false
 
     var onTranscriptionFinished: ((String) -> Void)?
+    var selectedDeviceID: AudioDeviceID?
 
     let model: FluidAudioModel
     private let modelManager: FluidAudioModelManager
@@ -274,6 +323,7 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
     private let bufferQueue = DispatchQueue(label: "com.kaze.fluidaudio.audioBuffer")
     private var _audioBuffer: [Float] = []
     private var _inputSampleRate: Double = 16000
+    private var transcriptionTask: Task<Void, Never>?
 
     /// Maximum recording duration in seconds.
     private static let maxRecordingSeconds: Double = 300 // 5 minutes
@@ -284,6 +334,10 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
         self.modelManager = modelManager
     }
 
+    deinit {
+        transcriptionTask?.cancel()
+    }
+
     func requestPermissions() async -> Bool {
         let micStatus = await AVCaptureDevice.requestAccess(for: .audio)
         return micStatus
@@ -291,6 +345,8 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
 
     func startRecording() {
         guard !isRecording else { return }
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
 
         // Reset buffer with pre-allocation
         bufferQueue.sync {
@@ -338,11 +394,14 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
                 }
             }
 
+            applyInputDevice(selectedDeviceID, to: audioEngine)
             audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
         } catch {
             print("FluidAudioTranscriber: Failed to start recording: \(error)")
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isRecording = false
         }
     }
 
@@ -368,25 +427,30 @@ class FluidAudioTranscriber: ObservableObject, TranscriberProtocol {
             return
         }
 
-        Task {
-            await transcribeAudio(capturedAudio, sampleRate: sampleRate)
+        transcriptionTask?.cancel()
+        transcriptionTask = Task { [weak self] in
+            await self?.transcribeAudio(capturedAudio, sampleRate: sampleRate)
         }
     }
 
     private func transcribeAudio(_ samples: [Float], sampleRate: Double) async {
+        guard !Task.isCancelled else { return }
         do {
             // Ensure model is loaded
             try await modelManager.loadModel()
+            guard !Task.isCancelled else { return }
 
             // Write audio to a temporary WAV file (FluidAudio/Parakeet needs a file URL)
             let tempURL = try writeWAVFile(samples: samples, sampleRate: sampleRate)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
             let text = try await modelManager.transcribe(audioURL: tempURL)
+            guard !Task.isCancelled else { return }
 
             transcribedText = text
             onTranscriptionFinished?(text)
         } catch {
+            guard !Task.isCancelled else { return }
             print("FluidAudioTranscriber: Transcription failed: \(error)")
             onTranscriptionFinished?("")
         }

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreAudio
 import Accelerate
 import Combine
 import WhisperKit
@@ -97,6 +98,8 @@ class WhisperModelManager: ObservableObject {
     }
 
     private var whisperKit: WhisperKit?
+    private var loadTask: Task<WhisperKit, any Error>?
+    private var downloadTask: Task<Void, Never>?
 
     init() {
         let raw = UserDefaults.standard.string(forKey: AppPreferenceKey.whisperModelVariant)
@@ -139,24 +142,43 @@ class WhisperModelManager: ObservableObject {
 
         state = .downloading(progress: 0)
 
-        do {
-            let modelFolder = try await WhisperKit.download(
-                variant: selectedVariant.whisperKitVariant,
-                downloadBase: modelDirectory,
-                progressCallback: { [weak self] progress in
-                    Task { @MainActor [weak self] in
-                        self?.state = .downloading(progress: progress.fractionCompleted)
+        let task = Task {
+            do {
+                let modelFolder = try await WhisperKit.download(
+                    variant: selectedVariant.whisperKitVariant,
+                    downloadBase: modelDirectory,
+                    progressCallback: { [weak self] progress in
+                        Task { @MainActor [weak self] in
+                            guard let self, !Task.isCancelled else { return }
+                            self.state = .downloading(progress: progress.fractionCompleted)
+                        }
                     }
-                }
-            )
+                )
+                guard !Task.isCancelled else { return }
 
-            // Store the path for this variant
-            UserDefaults.standard.set(modelFolder.path, forKey: modelPathKey)
-            state = .downloaded
-            refreshModelSizeOnDisk()
-        } catch {
-            state = .error("Download failed: \(error.localizedDescription)")
+                // Store the path for this variant
+                UserDefaults.standard.set(modelFolder.path, forKey: modelPathKey)
+                state = .downloaded
+                refreshModelSizeOnDisk()
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error("Download failed: \(error.localizedDescription)")
+            }
         }
+        downloadTask = task
+        await task.value
+        downloadTask = nil
+    }
+
+    /// Cancels an in-progress download and resets to not-downloaded state.
+    func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        // Clean up any partial files
+        try? FileManager.default.removeItem(at: modelDirectory)
+        UserDefaults.standard.removeObject(forKey: modelPathKey)
+        state = .notDownloaded
+        modelSizeOnDiskCached = ""
     }
 
     /// Initializes WhisperKit with the downloaded model. Returns the ready instance.
@@ -165,27 +187,42 @@ class WhisperModelManager: ObservableObject {
             return existing
         }
 
+        // If a load is already in-flight, await it instead of starting a duplicate.
+        if let existing = loadTask {
+            return try await existing.value
+        }
+
         state = .loading
 
         // Try stored path first
         let modelPath: String? = UserDefaults.standard.string(forKey: modelPathKey)
 
-        let config = WhisperKitConfig(
-            model: selectedVariant.whisperKitVariant,
-            downloadBase: modelDirectory,
-            modelFolder: modelPath,
-            verbose: false,
-            logLevel: .none,
-            prewarm: true,
-            load: true,
-            download: modelPath == nil
-        )
+        let task = Task<WhisperKit, any Error> {
+            let config = WhisperKitConfig(
+                model: selectedVariant.whisperKitVariant,
+                downloadBase: modelDirectory,
+                modelFolder: modelPath,
+                verbose: false,
+                logLevel: .none,
+                prewarm: true,
+                load: true,
+                download: modelPath == nil
+            )
+            return try await WhisperKit(config)
+        }
+        loadTask = task
 
-        let kit = try await WhisperKit(config)
-        whisperKit = kit
-        state = .ready
-        refreshModelSizeOnDisk()
-        return kit
+        do {
+            let kit = try await task.value
+            loadTask = nil
+            whisperKit = kit
+            state = .ready
+            refreshModelSizeOnDisk()
+            return kit
+        } catch {
+            loadTask = nil
+            throw error
+        }
     }
 
     /// Deletes the currently selected model's files.
@@ -197,8 +234,24 @@ class WhisperModelManager: ObservableObject {
         modelSizeOnDiskCached = ""
     }
 
+    /// Releases the loaded Whisper runtime from memory while keeping files on disk.
+    func unloadModelFromMemory() {
+        loadTask?.cancel()
+        loadTask = nil
+        whisperKit = nil
+        switch state {
+        case .ready, .loading:
+            state = .downloaded
+        default:
+            break
+        }
+    }
+
     /// The cached WhisperKit instance, if loaded.
     var loadedKit: WhisperKit? { whisperKit }
+
+    /// Whether a loaded runtime instance is available.
+    var isLoaded: Bool { whisperKit != nil }
 
     /// Size of the currently selected model on disk (cached, not computed on every view redraw).
     var modelSizeOnDisk: String { modelSizeOnDiskCached }
@@ -240,6 +293,7 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
     @Published var isEnhancing = false
 
     var onTranscriptionFinished: ((String) -> Void)?
+    var selectedDeviceID: AudioDeviceID?
 
     /// Custom words to bias recognition toward (names, abbreviations, etc.)
     var customWords: [String] = []
@@ -252,6 +306,7 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
     private let bufferQueue = DispatchQueue(label: "com.kaze.whisper.audioBuffer")
     private var _audioBuffer: [Float] = []
     private var _inputSampleRate: Double = 16000
+    private var transcriptionTask: Task<Void, Never>?
 
     /// Maximum recording duration in seconds (prevents unbounded memory growth).
     private static let maxRecordingSeconds: Double = 300 // 5 minutes
@@ -262,6 +317,10 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
         self.modelManager = modelManager
     }
 
+    deinit {
+        transcriptionTask?.cancel()
+    }
+
     func requestPermissions() async -> Bool {
         // Whisper only needs microphone access (no SFSpeechRecognizer authorization needed)
         let micStatus = await AVCaptureDevice.requestAccess(for: .audio)
@@ -270,6 +329,8 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
 
     func startRecording() {
         guard !isRecording else { return }
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
 
         // Reset buffer with pre-allocation (Fix #3: avoid repeated reallocations)
         bufferQueue.sync {
@@ -319,11 +380,14 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
                 }
             }
 
+            applyInputDevice(selectedDeviceID, to: audioEngine)
             audioEngine.prepare()
             try audioEngine.start()
             isRecording = true
         } catch {
             print("WhisperTranscriber: Failed to start recording: \(error)")
+            audioEngine.inputNode.removeTap(onBus: 0)
+            isRecording = false
         }
     }
 
@@ -349,14 +413,17 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             return
         }
 
-        Task {
-            await transcribeAudio(capturedAudio, inputSampleRate: sampleRate)
+        transcriptionTask?.cancel()
+        transcriptionTask = Task { [weak self] in
+            await self?.transcribeAudio(capturedAudio, inputSampleRate: sampleRate)
         }
     }
 
     private func transcribeAudio(_ samples: [Float], inputSampleRate: Double) async {
+        guard !Task.isCancelled else { return }
         do {
             let kit = try await modelManager.loadModel()
+            guard !Task.isCancelled else { return }
 
             let targetSampleRate = Double(WhisperKit.sampleRate) // 16000
 
@@ -369,6 +436,7 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             } else {
                 audioForWhisper = samples
             }
+            guard !Task.isCancelled else { return }
 
             // Build decoding options with custom vocabulary as initial prompt
             var decodeOptions = DecodingOptions()
@@ -379,11 +447,13 @@ class WhisperTranscriber: ObservableObject, TranscriberProtocol {
             }
 
             let results: [TranscriptionResult] = try await kit.transcribe(audioArray: audioForWhisper, decodeOptions: decodeOptions)
+            guard !Task.isCancelled else { return }
             let text = results.compactMap { $0.text }.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 
             transcribedText = text
             onTranscriptionFinished?(text)
         } catch {
+            guard !Task.isCancelled else { return }
             print("WhisperTranscriber: Transcription failed: \(error)")
             onTranscriptionFinished?("")
         }

@@ -1,5 +1,9 @@
 import SwiftUI
 import AppKit
+import AVFoundation
+import CoreAudio
+import Combine
+import ServiceManagement
 
 // MARK: - Settings Tab Enum
 
@@ -101,10 +105,15 @@ private struct GeneralSettingsView: View {
     @AppStorage(AppPreferenceKey.enhancementMode) private var enhancementModeRaw = EnhancementMode.off.rawValue
     @AppStorage(AppPreferenceKey.enhancementSystemPrompt) private var systemPrompt = AppPreferenceKey.defaultEnhancementPrompt
     @AppStorage(AppPreferenceKey.hotkeyMode) private var hotkeyModeRaw = HotkeyMode.holdToTalk.rawValue
+    @AppStorage(AppPreferenceKey.notchMode) private var notchMode = true
+    @AppStorage(AppPreferenceKey.selectedMicrophoneID) private var selectedMicrophoneID = ""
+    @AppStorage(AppPreferenceKey.appendTrailingSpace) private var appendTrailingSpace = false
     @State private var hotkeyShortcut = HotkeyShortcut.loadFromDefaults()
     @State private var isRecordingHotkey = false
     @State private var hotkeyMonitor: Any?
     @State private var recordedModifiersUnion: HotkeyShortcut.Modifiers = []
+    @State private var availableMicrophones: [(id: String, name: String)] = []
+    @StateObject private var audioDeviceObserver = AudioDeviceObserver()
 
     @ObservedObject var whisperModelManager: WhisperModelManager
     @ObservedObject var parakeetModelManager: FluidAudioModelManager
@@ -126,166 +135,308 @@ private struct GeneralSettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                // MARK: Transcription
-                formRow("Transcription engine:") {
-                    Picker("Engine", selection: $engineRaw) {
-                        ForEach(TranscriptionEngine.allCases) { engine in
-                            Text(engine.title).tag(engine.rawValue)
-                        }
+        VStack(spacing: 0) {
+            // MARK: Transcription
+            formRow("Transcription engine:") {
+                Picker("Engine", selection: $engineRaw) {
+                    ForEach(TranscriptionEngine.allCases) { engine in
+                        Text(engine.title).tag(engine.rawValue)
                     }
-                    .labelsHidden()
                 }
+                .labelsHidden()
+            }
 
-                // Engine details card: description + model controls + status
-                formRow("") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(selectedEngine.description)
+            // Engine details card: description + model controls + status
+            formRow("") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(selectedEngine.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if selectedEngine == .whisper {
+                        Picker("Model", selection: Binding(
+                            get: { whisperModelManager.selectedVariant },
+                            set: { whisperModelManager.selectedVariant = $0 }
+                        )) {
+                            ForEach(WhisperModelVariant.allCases) { variant in
+                                Text("\(variant.title) (\(variant.sizeDescription))").tag(variant)
+                            }
+                        }
+                        .labelsHidden()
+                        .disabled(isModelBusy)
+
+                        Text(whisperModelManager.selectedVariant.qualityDescription)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
 
-                        if selectedEngine == .whisper {
-                            Picker("Model", selection: Binding(
-                                get: { whisperModelManager.selectedVariant },
-                                set: { whisperModelManager.selectedVariant = $0 }
-                            )) {
-                                ForEach(WhisperModelVariant.allCases) { variant in
-                                    Text("\(variant.title) (\(variant.sizeDescription))").tag(variant)
-                                }
-                            }
-                            .labelsHidden()
-                            .disabled(isModelBusy)
+                        whisperModelStatusRow
+                    }
 
-                            Text(whisperModelManager.selectedVariant.qualityDescription)
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
+                    if selectedEngine == .parakeet {
+                        fluidAudioModelStatusRow(manager: parakeetModelManager, model: .parakeet)
+                    }
 
-                            whisperModelStatusRow
-                        }
-
-                        if selectedEngine == .parakeet {
-                            fluidAudioModelStatusRow(manager: parakeetModelManager, model: .parakeet)
-                        }
-
-                        if selectedEngine == .qwen {
-                            fluidAudioModelStatusRow(manager: qwenModelManager, model: .qwen)
-                        }
+                    if selectedEngine == .qwen {
+                        fluidAudioModelStatusRow(manager: qwenModelManager, model: .qwen)
                     }
                 }
+            }
 
-                sectionDivider()
+            sectionDivider()
 
-                // MARK: Hotkey
-                formRow("Hotkey mode:") {
-                    Picker("Mode", selection: $hotkeyModeRaw) {
-                        ForEach(HotkeyMode.allCases) { mode in
-                            Text(mode.title).tag(mode.rawValue)
+            // MARK: Microphone
+            formRow("Microphone:") {
+                Picker("Microphone", selection: $selectedMicrophoneID) {
+                    Text("System Default").tag("")
+                    ForEach(availableMicrophones, id: \.id) { mic in
+                        Text(mic.name).tag(mic.id)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            sectionDivider()
+
+            // MARK: Hotkey
+            formRow("Hotkey mode:") {
+                Picker("Mode", selection: $hotkeyModeRaw) {
+                    ForEach(HotkeyMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            formRow("Shortcut:") {
+                HStack(spacing: 8) {
+                    HStack(spacing: 3) {
+                        ForEach(hotkeyShortcut.displayTokens, id: \.self) { token in
+                            KeyCapView(token)
                         }
                     }
-                    .labelsHidden()
-                }
-
-                formRow("Shortcut:") {
-                    HStack(spacing: 8) {
-                        HStack(spacing: 3) {
-                            ForEach(hotkeyShortcut.displayTokens, id: \.self) { token in
-                                KeyCapView(token)
-                            }
-                        }
-                        Button(isRecordingHotkey ? "Press keys..." : "Record") {
-                            if isRecordingHotkey {
-                                stopHotkeyRecording()
-                            } else {
-                                startHotkeyRecording()
-                            }
-                        }
-                        .controlSize(.small)
-                        Button("Reset") {
-                            hotkeyShortcut = .default
-                            hotkeyShortcut.saveToDefaults()
+                    Button(isRecordingHotkey ? "Press keys..." : "Record") {
+                        if isRecordingHotkey {
                             stopHotkeyRecording()
+                        } else {
+                            startHotkeyRecording()
                         }
-                        .controlSize(.small)
                     }
+                    .controlSize(.small)
+                    Button("Reset") {
+                        hotkeyShortcut = .default
+                        hotkeyShortcut.saveToDefaults()
+                        stopHotkeyRecording()
+                    }
+                    .controlSize(.small)
                 }
+            }
 
+            formRow("") {
+                Text(selectedHotkeyMode.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if isRecordingHotkey {
                 formRow("") {
-                    Text(selectedHotkeyMode.description)
+                    Text("Press a key combination with at least one modifier (⌘ ⌥ ⌃ ⇧ fn). For modifier-only shortcuts, hold modifiers then release. Press Esc to cancel.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+            }
 
-                if isRecordingHotkey {
-                    formRow("") {
-                        Text("Press a key combination with at least one modifier (⌘ ⌥ ⌃ ⇧ fn). For modifier-only shortcuts, hold modifiers then release. Press Esc to cancel.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+            sectionDivider()
+
+            // MARK: Enhancement
+            formRow("Text enhancement:") {
+                Picker("Enhancement", selection: $enhancementModeRaw) {
+                    Text(EnhancementMode.off.title).tag(EnhancementMode.off.rawValue)
+                    Text(EnhancementMode.appleIntelligence.title)
+                        .tag(EnhancementMode.appleIntelligence.rawValue)
                 }
+                .labelsHidden()
+                .disabled(selectedEngine != .dictation)
+            }
 
-                sectionDivider()
-
-                // MARK: Enhancement
-                formRow("Text enhancement:") {
-                    Picker("Enhancement", selection: $enhancementModeRaw) {
-                        Text(EnhancementMode.off.title).tag(EnhancementMode.off.rawValue)
-                        Text(EnhancementMode.appleIntelligence.title)
-                            .tag(EnhancementMode.appleIntelligence.rawValue)
-                    }
-                    .labelsHidden()
+            if selectedEngine != .dictation {
+                formRow("") {
+                    Label("Text enhancement is only available with Direct Dictation. AI models already produce enhanced output.", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-
-                if !appleIntelligenceAvailable {
-                    formRow("") {
-                        Label("Apple Intelligence is not available on this Mac.", systemImage: "info.circle")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+            } else if !appleIntelligenceAvailable {
+                formRow("") {
+                    Label("Apple Intelligence is not available on this Mac.", systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+            }
 
-                if enhancementModeRaw == EnhancementMode.appleIntelligence.rawValue {
-                    formRow("System prompt:") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            TextEditor(text: $systemPrompt)
-                                .font(.system(size: 11, design: .monospaced))
-                                .frame(height: 80)
-                                .scrollContentBackground(.hidden)
-                                .padding(6)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(.quaternary.opacity(0.5))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .strokeBorder(.quaternary, lineWidth: 1)
-                                )
+            if enhancementModeRaw == EnhancementMode.appleIntelligence.rawValue, selectedEngine == .dictation {
+                formRow("System prompt:") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextEditor(text: $systemPrompt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(height: 80)
+                            .scrollContentBackground(.hidden)
+                            .padding(6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(.quaternary.opacity(0.5))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .strokeBorder(.quaternary, lineWidth: 1)
+                            )
 
-                            HStack {
-                                Text("Customise how Apple Intelligence enhances your transcriptions.")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                                Spacer()
-                                Button("Reset to Default") {
-                                    systemPrompt = AppPreferenceKey.defaultEnhancementPrompt
-                                }
-                                .controlSize(.small)
-                                .disabled(systemPrompt == AppPreferenceKey.defaultEnhancementPrompt)
+                        HStack {
+                            Text("Customise how Apple Intelligence enhances your transcriptions.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                            Button("Reset to Default") {
+                                systemPrompt = AppPreferenceKey.defaultEnhancementPrompt
                             }
+                            .controlSize(.small)
+                            .disabled(systemPrompt == AppPreferenceKey.defaultEnhancementPrompt)
                         }
                     }
                 }
-
-                Spacer(minLength: 20)
             }
-            .padding(.top, 12)
+
+            sectionDivider()
+
+            // MARK: Appearance
+            formRow("Notch mode:") {
+                Toggle(isOn: $notchMode) {
+                    Text("Dynamic Island style")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            formRow("") {
+                Text("Show the recording indicator at the top of the screen, like a Dynamic Island around the MacBook notch. When off, a floating pill appears at the bottom.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            sectionDivider()
+
+            // MARK: Output
+            formRow("Trailing space:") {
+                Toggle(isOn: $appendTrailingSpace) {
+                    Text("Append a space after each transcription")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            sectionDivider()
+
+            // MARK: System
+            formRow("Launch at login:") {
+                Toggle(isOn: Binding(
+                    get: { SMAppService.mainApp.status == .enabled },
+                    set: { newValue in
+                        do {
+                            if newValue {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            print("Launch at login toggle failed: \(error)")
+                        }
+                    }
+                )) {
+                    Text("Start Kaze when you log in")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            Spacer(minLength: 20)
         }
+        .padding(.top, 12)
         .onDisappear {
             stopHotkeyRecording()
+            audioDeviceObserver.stop()
         }
         .onAppear {
             hotkeyShortcut = HotkeyShortcut.loadFromDefaults()
+            availableMicrophones = Self.listInputDevices()
+            audioDeviceObserver.onChange = {
+                availableMicrophones = Self.listInputDevices()
+            }
+            audioDeviceObserver.start()
         }
+    }
+
+    // MARK: - Audio Device Enumeration
+
+    private static func listInputDevices() -> [(id: String, name: String)] {
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil, &dataSize
+        ) == noErr else { return [] }
+
+        let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
+        var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress, 0, nil, &dataSize, &deviceIDs
+        ) == noErr else { return [] }
+
+        var result: [(id: String, name: String)] = []
+
+        for deviceID in deviceIDs {
+            // Check if device has input channels
+            var inputAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyStreamConfiguration,
+                mScope: kAudioDevicePropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+
+            var inputSize: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(deviceID, &inputAddress, 0, nil, &inputSize) == noErr,
+                  inputSize > 0 else { continue }
+
+            let rawBuffer = UnsafeMutableRawPointer.allocate(
+                byteCount: Int(inputSize),
+                alignment: MemoryLayout<AudioBufferList>.alignment
+            )
+            defer { rawBuffer.deallocate() }
+
+            guard AudioObjectGetPropertyData(deviceID, &inputAddress, 0, nil, &inputSize, rawBuffer) == noErr else { continue }
+
+            let bufferListPtr = rawBuffer.assumingMemoryBound(to: AudioBufferList.self)
+            let bufferList = UnsafeMutableAudioBufferListPointer(bufferListPtr)
+            let inputChannels = bufferList.reduce(0) { $0 + Int($1.mNumberChannels) }
+            guard inputChannels > 0 else { continue }
+
+            // Get device name
+            var nameAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDeviceNameCFString,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+
+            var name: CFString = "" as CFString
+            var nameSize = UInt32(MemoryLayout<CFString>.size)
+            guard AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &nameSize, &name) == noErr else { continue }
+
+            result.append((id: String(deviceID), name: name as String))
+        }
+
+        return result
     }
 
     // MARK: - Whisper Model Status
@@ -312,6 +463,10 @@ private struct GeneralSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                Button("Cancel", role: .destructive) {
+                    whisperModelManager.cancelDownload()
+                }
+                .controlSize(.small)
             }
 
         case .downloaded:
@@ -432,6 +587,10 @@ private struct GeneralSettingsView: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
+                Button("Cancel", role: .destructive) {
+                    manager.cancelDownload()
+                }
+                .controlSize(.small)
             }
 
         case .downloaded:
@@ -566,6 +725,8 @@ private struct GeneralSettingsView: View {
             self.hotkeyMonitor = nil
         }
     }
+
+
 }
 
 // MARK: - History Tab
@@ -789,6 +950,56 @@ private struct VocabularySettingsView: View {
     }
 }
 
+// MARK: - Audio Device Observer
+
+/// Observes Core Audio device list changes and calls `onChange` on the main thread.
+class AudioDeviceObserver: ObservableObject {
+    @Published private var _tick = false
+    var onChange: (() -> Void)?
+    private var listenerBlock: AudioObjectPropertyListenerBlock?
+
+    func start() {
+        guard listenerBlock == nil else { return }
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.onChange?()
+        }
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            DispatchQueue.main,
+            block
+        )
+        if status == noErr {
+            listenerBlock = block
+        }
+    }
+
+    func stop() {
+        guard let block = listenerBlock else { return }
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            DispatchQueue.main,
+            block
+        )
+        listenerBlock = nil
+    }
+
+    deinit {
+        stop()
+    }
+}
+
 // MARK: - Shared Form Helpers
 
 private let formLabelWidth: CGFloat = 140
@@ -811,6 +1022,64 @@ private func sectionDivider() -> some View {
     Divider()
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
+}
+
+// MARK: - About View
+
+struct AboutView: View {
+    private let appVersion: String = {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        return "v\(version) (\(build))"
+    }()
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if let icon = NSImage(named: "kaze-icon") {
+                Image(nsImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 64, height: 64)
+            } else {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Kaze")
+                .font(.title2.bold())
+
+            Text(appVersion)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Speech-to-text, entirely on-device.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+
+            Divider()
+                .padding(.horizontal, 40)
+
+            HStack(spacing: 16) {
+                Button("GitHub") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/fayazara/Kaze")!)
+                }
+                .controlSize(.small)
+
+                Button("Releases") {
+                    NSWorkspace.shared.open(URL(string: "https://github.com/fayazara/Kaze/releases")!)
+                }
+                .controlSize(.small)
+            }
+
+            Text("MIT License")
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+        }
+        .padding(.vertical, 20)
+        .padding(.horizontal, 40)
+        .frame(width: 300)
+    }
 }
 
 // MARK: - Key Cap View

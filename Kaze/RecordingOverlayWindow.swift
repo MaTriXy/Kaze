@@ -9,6 +9,7 @@ class OverlayState: ObservableObject {
     @Published var audioLevel: Float = 0.0
     @Published var transcribedText = ""
     @Published var isEnhancing = false
+    @Published var isVisible = false
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -48,15 +49,17 @@ class OverlayState: ObservableObject {
         audioLevel = 0
         transcribedText = ""
         isEnhancing = false
+        isVisible = false
         cancellables.removeAll()
     }
 }
 
 /// A borderless, non-activating floating panel that sits at the bottom-center
-/// of the main screen and hosts the WaveformView.
+/// (or top-center in notch mode) of the main screen and hosts the WaveformView.
 class RecordingOverlayWindow: NSPanel {
 
     private var hostingView: NSHostingView<OverlayContent>?
+    private(set) var isNotchMode = false
 
     init() {
         super.init(
@@ -75,34 +78,82 @@ class RecordingOverlayWindow: NSPanel {
         ignoresMouseEvents = true
     }
 
-    func show(state: OverlayState) {
-        let content = OverlayContent(state: state)
+    func show(state: OverlayState, notchMode: Bool = false) {
+        self.isNotchMode = notchMode
+
+        let content = OverlayContent(state: state, notchMode: notchMode)
         let hosting = NSHostingView(rootView: content)
         hosting.translatesAutoresizingMaskIntoConstraints = false
         contentView = hosting
         hostingView = hosting
 
-        // Position at bottom-center. The window is tall enough for the pill
-        // to expand downward when text appears (top-center anchor in SwiftUI).
-        let size = CGSize(width: 360, height: 140)
-        if let screen = NSScreen.main {
-            let x = screen.visibleFrame.midX - size.width / 2
-            let y = screen.visibleFrame.minY + 30
-            setFrame(CGRect(origin: CGPoint(x: x, y: y), size: size), display: false)
+        if notchMode {
+            // Notch mode: position at top-center, flush with top of screen
+            // Use a higher window level so it sits above everything like the real notch
+            level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
+            collectionBehavior = [.stationary, .canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+
+            let shadowPadding: CGFloat = 20
+            let contentWidth: CGFloat = 360
+            let contentHeight: CGFloat = 140
+            let totalWidth = contentWidth + shadowPadding * 2
+            let totalHeight = contentHeight + shadowPadding
+
+            if let screen = NSScreen.main {
+                let x = screen.frame.origin.x + (screen.frame.width - totalWidth) / 2
+                let y = screen.frame.origin.y + screen.frame.height - totalHeight
+                setFrame(CGRect(x: x, y: y, width: totalWidth, height: totalHeight), display: false)
+            }
+        } else {
+            // Default pill mode: position at bottom-center
+            level = .floating
+            collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+            let size = CGSize(width: 360, height: 140)
+            if let screen = NSScreen.main {
+                let x = screen.visibleFrame.midX - size.width / 2
+                let y = screen.visibleFrame.minY + 30
+                setFrame(CGRect(origin: CGPoint(x: x, y: y), size: size), display: false)
+            }
         }
 
         alphaValue = 1
         orderFront(nil)
+
+        // Trigger the expand animation on next runloop tick so SwiftUI picks it up
+        if notchMode {
+            DispatchQueue.main.async {
+                state.isVisible = true
+            }
+        }
     }
 
-    func hide(completion: (() -> Void)? = nil) {
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.3
-            animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
-            self?.orderOut(nil)
-            completion?()
-        })
+    func hide(state: OverlayState? = nil, completion: (() -> Void)? = nil) {
+        if isNotchMode, let state {
+            // Step 1: Clear text and collapse to compact shape
+            state.transcribedText = ""
+            state.isEnhancing = false
+            state.isRecording = false
+
+            // Step 2: After compact transition settles, shrink width to zero
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                state.isVisible = false
+            }
+
+            // Step 3: Remove window after shrink animation completes
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+                self?.orderOut(nil)
+                completion?()
+            }
+        } else {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.3
+                animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                self?.orderOut(nil)
+                completion?()
+            })
+        }
     }
 }
 
@@ -110,15 +161,18 @@ class RecordingOverlayWindow: NSPanel {
 
 private struct OverlayContent: View {
     @ObservedObject var state: OverlayState
+    var notchMode: Bool = false
 
     var body: some View {
         WaveformView(
             audioLevel: state.audioLevel,
             isRecording: state.isRecording,
             transcribedText: state.transcribedText,
-            isEnhancing: state.isEnhancing
+            isEnhancing: state.isEnhancing,
+            notchMode: notchMode,
+            notchVisible: state.isVisible
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.top, 8)
+        .padding(.top, notchMode ? 0 : 8)
     }
 }

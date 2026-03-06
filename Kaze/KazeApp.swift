@@ -1,5 +1,7 @@
 import SwiftUI
 import AppKit
+import CoreAudio
+import Combine
 
 enum TranscriptionEngine: String, CaseIterable, Identifiable {
     case dictation
@@ -79,6 +81,10 @@ enum AppPreferenceKey {
     static let hotkeyShortcut = "hotkeyShortcut"
     static let whisperModelVariant = "whisperModelVariant"
     static let fluidAudioModelState = "fluidAudioModelState"
+    static let notchMode = "notchMode"
+    static let selectedMicrophoneID = "selectedMicrophoneID"
+    static let appendTrailingSpace = "appendTrailingSpace"
+    static let launchAtLogin = "launchAtLogin"
 
     static let defaultEnhancementPrompt = """
         You are Kaze, a speech-to-text transcription assistant. Your only job is to \
@@ -124,9 +130,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayWindow = RecordingOverlayWindow()
     private let overlayState = OverlayState()
     private var statusItem: NSStatusItem?
+    private var cancellables = Set<AnyCancellable>()
 
     private var enhancer: TextEnhancer?
     private var settingsWindowController: NSWindowController?
+    private var onboardingWindowController: NSWindowController?
 
     var transcriptionEngine: TranscriptionEngine {
         get {
@@ -158,8 +166,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private var notchModeEnabled: Bool {
+        UserDefaults.standard.bool(forKey: AppPreferenceKey.notchMode)
+    }
+
+    /// Returns the Core Audio device ID for the user-selected microphone, or nil for system default.
+    private var selectedMicrophoneDeviceID: AudioDeviceID? {
+        let stored = UserDefaults.standard.string(forKey: AppPreferenceKey.selectedMicrophoneID) ?? ""
+        guard !stored.isEmpty, let id = UInt32(stored) else { return nil }
+        return id
+    }
+
     private var hotkeyModeObserver: NSObjectProtocol?
     private var isSessionActive = false
+    private var idleModelUnloadTask: Task<Void, Never>?
+    private var observedEngineForPreferenceChanges: TranscriptionEngine?
+    private static let modelUnloadIdleDelay: Duration = .seconds(90)
 
     /// Returns the currently active transcriber based on the user's engine preference.
     private var activeTranscriber: (any TranscriberProtocol)? {
@@ -210,6 +232,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.image?.accessibilityDescription = "Kaze"
         }
         buildMenu()
+        observedEngineForPreferenceChanges = transcriptionEngine
+        observeModelState()
+        updateStatusItemIndicator()
 
         Task {
             let granted = await speechTranscriber.requestPermissions()
@@ -218,6 +243,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             setupHotkey()
+
+            if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
+                showOnboarding()
+            }
         }
     }
 
@@ -233,12 +262,110 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func buildMenu() {
         let menu = NSMenu()
 
+        let aboutItem = NSMenuItem(title: "About Kaze", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit Kaze", action: #selector(quit), keyEquivalent: "q"))
         statusItem?.menu = menu
+    }
+
+    private var aboutWindowController: NSWindowController?
+
+    @objc private func showAbout() {
+        if let window = aboutWindowController?.window {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let aboutView = AboutView()
+        let hostingController = NSHostingController(rootView: aboutView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 300, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.center()
+        window.title = "About Kaze"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+
+        let controller = NSWindowController(window: window)
+        aboutWindowController = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.showWindow(nil)
+    }
+
+    private func observeModelState() {
+        whisperModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+
+        parakeetModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+
+        qwenModelManager.$state
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateStatusItemIndicator() }
+            .store(in: &cancellables)
+    }
+
+    private func updateStatusItemIndicator() {
+        guard let statusItem, let button = statusItem.button else { return }
+        let runtimesLoaded = whisperModelManager.isLoaded || parakeetModelManager.isLoaded || qwenModelManager.isLoaded
+        let shouldMuteIcon = !isSessionActive && !runtimesLoaded
+
+        statusItem.length = NSStatusItem.squareLength
+        button.attributedTitle = NSAttributedString(string: "")
+        button.alphaValue = shouldMuteIcon ? 0.45 : 1.0
+        button.contentTintColor = shouldMuteIcon ? NSColor.tertiaryLabelColor : nil
+    }
+
+    private func showOnboarding() {
+        let onboardingView = OnboardingView { [weak self] in
+            self?.onboardingWindowController?.window?.close()
+            self?.onboardingWindowController = nil
+            // Reload hotkey in case the user changed it during onboarding
+            self?.hotkeyManager.shortcut = HotkeyShortcut.loadFromDefaults()
+            self?.hotkeyManager.mode = self?.hotkeyMode ?? .holdToTalk
+        }
+        let hostingController = NSHostingController(rootView: onboardingView)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 500),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Welcome to Kaze"
+        window.contentViewController = hostingController
+        window.isReleasedWhenClosed = false
+
+        // Manually center on the main screen
+        if let screen = NSScreen.main {
+            let screenFrame = screen.visibleFrame
+            let windowSize = window.frame.size
+            let x = screenFrame.midX - windowSize.width / 2
+            let y = screenFrame.midY - windowSize.height / 2
+            window.setFrameOrigin(NSPoint(x: x, y: y))
+        }
+
+        let controller = NSWindowController(window: window)
+        onboardingWindowController = controller
+        NSApp.activate(ignoringOtherApps: true)
+        controller.showWindow(nil)
     }
 
     @objc private func openSettings() {
@@ -259,12 +386,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(rootView: contentView)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.minSize = NSSize(width: 500, height: 400)
+        window.minSize = NSSize(width: 500, height: 800)
+        window.maxSize = NSSize(width: 500, height: 800)
         window.center()
         window.title = "Kaze Settings"
         window.contentViewController = hostingController
@@ -308,12 +436,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.hotkeyManager.shortcut != newShortcut {
                     self.hotkeyManager.shortcut = newShortcut
                 }
+
+                self.handleEnginePreferenceChange()
             }
         }
+
     }
 
     private func beginRecording() {
         guard !isSessionActive else { return }
+        idleModelUnloadTask?.cancel()
+        idleModelUnloadTask = nil
 
         let engine = transcriptionEngine
 
@@ -323,41 +456,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         isSessionActive = true
+        updateStatusItemIndicator()
 
-        // Pass current custom words to the transcriber
+        // Pass current custom words and selected microphone to the transcriber
         let words = customWordsManager.words
+        let micID = selectedMicrophoneDeviceID
 
         // Use the appropriate transcriber
         if engine == .whisper, isEngineReady(.whisper) {
             let whisper = whisperTranscriber ?? WhisperTranscriber(modelManager: whisperModelManager)
             whisperTranscriber = whisper
             whisper.customWords = words
+            whisper.selectedDeviceID = micID
             whisper.onTranscriptionFinished = { [weak self] (text: String) in
                 guard let self else { return }
                 self.processTranscription(text)
             }
             overlayState.bind(to: whisper)
-            overlayWindow.show(state: overlayState)
+            overlayWindow.show(state: overlayState, notchMode: notchModeEnabled)
             whisper.startRecording()
         } else if (engine == .parakeet || engine == .qwen), isEngineReady(engine) {
             let manager = engine == .parakeet ? parakeetModelManager : qwenModelManager
             let model: FluidAudioModel = engine == .parakeet ? .parakeet : .qwen
             let transcriber = getOrCreateFluidAudioTranscriber(model: model, manager: manager)
+            transcriber.selectedDeviceID = micID
             transcriber.onTranscriptionFinished = { [weak self] (text: String) in
                 guard let self else { return }
                 self.processTranscription(text)
             }
             overlayState.bind(to: transcriber)
-            overlayWindow.show(state: overlayState)
+            overlayWindow.show(state: overlayState, notchMode: notchModeEnabled)
             transcriber.startRecording()
         } else {
             speechTranscriber.customWords = words
+            speechTranscriber.selectedDeviceID = micID
             speechTranscriber.onTranscriptionFinished = { [weak self] (text: String) in
                 guard let self else { return }
                 self.processTranscription(text)
             }
             overlayState.bind(to: speechTranscriber)
-            overlayWindow.show(state: overlayState)
+            overlayWindow.show(state: overlayState, notchMode: notchModeEnabled)
             speechTranscriber.startRecording()
         }
     }
@@ -410,8 +548,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let waitingForAI = enhancementMode == .appleIntelligence && enhancer != nil
             if !waitingForAI {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    self?.overlayWindow.hide()
+                    self?.overlayWindow.hide(state: self?.overlayState)
                     self?.isSessionActive = false
+                    self?.updateStatusItemIndicator()
+                    self?.scheduleIdleModelUnload()
                 }
             }
         }
@@ -422,22 +562,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         overlayState.isEnhancing = false
 
         guard !rawText.isEmpty else {
-            overlayWindow.hide()
+            overlayWindow.hide(state: overlayState)
             isSessionActive = false
+            updateStatusItemIndicator()
+            scheduleIdleModelUnload()
             return
         }
 
         let engine = transcriptionEngine
 
-        if enhancementMode == .appleIntelligence, let enhancer {
+        // Only apply AI enhancement for Direct Dictation — AI models already produce enhanced output.
+        if enhancementMode == .appleIntelligence, engine == .dictation, let enhancer {
             overlayState.isEnhancing = true
             setEnhancingState(true)
             Task {
                 defer {
                     self.overlayState.isEnhancing = false
                     self.setEnhancingState(false)
-                    self.overlayWindow.hide()
+                    self.overlayWindow.hide(state: self.overlayState)
                     self.isSessionActive = false
+                    self.updateStatusItemIndicator()
+                    self.scheduleIdleModelUnload()
                 }
                 do {
                     if #available(macOS 26.0, *) {
@@ -472,9 +617,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             historyManager.addRecord(
                 TranscriptionRecord(text: rawText, engine: engine, wasEnhanced: false)
             )
-            overlayWindow.hide()
+            overlayWindow.hide(state: overlayState)
             isSessionActive = false
+            updateStatusItemIndicator()
+            scheduleIdleModelUnload()
         }
+    }
+
+    private func handleEnginePreferenceChange() {
+        let currentEngine = transcriptionEngine
+        if observedEngineForPreferenceChanges == nil {
+            observedEngineForPreferenceChanges = currentEngine
+        }
+        guard observedEngineForPreferenceChanges != currentEngine else { return }
+        observedEngineForPreferenceChanges = currentEngine
+        guard !isSessionActive else { return }
+        scheduleIdleModelUnload()
+    }
+
+    private func scheduleIdleModelUnload() {
+        idleModelUnloadTask?.cancel()
+        idleModelUnloadTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: Self.modelUnloadIdleDelay)
+            } catch {
+                return // Task was cancelled, don't unload
+            }
+            await MainActor.run {
+                guard let self else { return }
+                guard !self.isSessionActive else { return }
+                self.unloadModelRuntimesFromMemory()
+            }
+        }
+    }
+
+    private func unloadModelRuntimesFromMemory() {
+        whisperModelManager.unloadModelFromMemory()
+        parakeetModelManager.unloadModelFromMemory()
+        qwenModelManager.unloadModelFromMemory()
+        whisperTranscriber = nil
+        fluidAudioTranscriber = nil
+        updateStatusItemIndicator()
     }
 
     private func setEnhancingState(_ enhancing: Bool) {
@@ -490,11 +673,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func typeText(_ text: String) {
         guard !text.isEmpty else { return }
+        var output = text
+        if UserDefaults.standard.bool(forKey: AppPreferenceKey.appendTrailingSpace) {
+            output += " "
+        }
+
         let source = CGEventSource(stateID: .hidSystemState)
         let pasteboard = NSPasteboard.general
-        let previous = pasteboard.string(forType: .string) ?? ""
         pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        pasteboard.setString(output, forType: .string)
 
         let vKeyCode: CGKeyCode = 0x09
         let cmdDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true)
@@ -504,18 +691,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         cmdDown?.post(tap: .cgAnnotatedSessionEventTap)
         cmdUp?.post(tap: .cgAnnotatedSessionEventTap)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            pasteboard.clearContents()
-            if !previous.isEmpty {
-                pasteboard.setString(previous, forType: .string)
-            }
-        }
     }
 
     @objc private func quit() {
         hotkeyManager.stop()
         NSApp.terminate(nil)
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        idleModelUnloadTask?.cancel()
+        hotkeyManager.stop()
+        cancellables.removeAll()
+        if let hotkeyModeObserver {
+            NotificationCenter.default.removeObserver(hotkeyModeObserver)
+            self.hotkeyModeObserver = nil
+        }
     }
 
     private func showPermissionAlert() {
