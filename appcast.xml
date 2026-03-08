@@ -20,6 +20,26 @@
     -->
 
     <item>
+      <title>Version 0.71</title>
+      <sparkle:version>3</sparkle:version>
+      <sparkle:shortVersionString>0.71</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <pubDate>Sun, 08 Mar 2026 17:30:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 0.71</h2>
+        <ul>
+          <li>Added creator info to About screen</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/fayazara/Kaze/releases/download/v0.71/Kaze.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="2w7c1pTjwUQ+3AhPTXV1xCPUDJuhrDwCr3r8JZAcF+NGgq6t4cteWJEZ4x7jSzr5h4JrovBios4jbcvx226cAw=="
+        length="6474977"
+      />
+    </item>
+
+    <item>
       <title>Version 0.7</title>
       <sparkle:version>2</sparkle:version>
       <sparkle:shortVersionString>0.7</sparkle:shortVersionString>

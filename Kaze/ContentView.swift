@@ -1007,6 +1007,8 @@ struct AboutView: View {
         return "v\(version) (\(build))"
     }()
 
+    @State private var avatarImage: NSImage?
+
     var body: some View {
         VStack(spacing: 12) {
             if let icon = NSImage(named: "kaze-icon") {
@@ -1034,6 +1036,43 @@ struct AboutView: View {
             Divider()
                 .padding(.horizontal, 40)
 
+            // Made by
+            VStack(spacing: 6) {
+                Text("Created by")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                Button {
+                    NSWorkspace.shared.open(URL(string: "https://x.com/fayazara")!)
+                } label: {
+                    HStack(spacing: 6) {
+                        if let avatarImage {
+                            Image(nsImage: avatarImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 20, height: 20)
+                                .clipShape(Circle())
+                        }
+                        Text("Fayaz Ahmed")
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.plain)
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.pointingHand.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+            }
+            .task {
+                await loadAvatar()
+            }
+
+            Divider()
+                .padding(.horizontal, 40)
+
             HStack(spacing: 16) {
                 Button("GitHub") {
                     NSWorkspace.shared.open(URL(string: "https://github.com/fayazara/Kaze")!)
@@ -1053,6 +1092,18 @@ struct AboutView: View {
         .padding(.vertical, 20)
         .padding(.horizontal, 40)
         .frame(width: 300)
+    }
+
+    private func loadAvatar() async {
+        guard let url = URL(string: "https://github.com/fayazara.png") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let image = NSImage(data: data) {
+                await MainActor.run { avatarImage = image }
+            }
+        } catch {
+            // Silently fail — the about view works fine without the avatar
+        }
     }
 }
 
