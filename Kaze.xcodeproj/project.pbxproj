@@ -374,13 +374,12 @@
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Kaze/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kaze;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kaze needs microphone access to transcribe your speech.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Kaze uses on-device speech recognition to convert your voice to text.";
-				INFOPLIST_KEY_SUFeedURL = "https://raw.githubusercontent.com/fayazara/Kaze/main/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "MA/6n0fqT0T2updDlkXr8BjhJKoHWik9uf6Lh5pUG7U=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -418,13 +417,12 @@
 				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Kaze/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kaze;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Kaze needs microphone access to transcribe your speech.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Kaze uses on-device speech recognition to convert your voice to text.";
-				INFOPLIST_KEY_SUFeedURL = "https://raw.githubusercontent.com/fayazara/Kaze/main/appcast.xml";
-				INFOPLIST_KEY_SUPublicEDKey = "MA/6n0fqT0T2updDlkXr8BjhJKoHWik9uf6Lh5pUG7U=";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
