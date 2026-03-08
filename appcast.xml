@@ -20,6 +20,26 @@
     -->
 
     <item>
+      <title>Version 0.74</title>
+      <sparkle:version>5</sparkle:version>
+      <sparkle:shortVersionString>0.74</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <pubDate>Sun, 08 Mar 2026 19:30:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 0.74</h2>
+        <ul>
+          <li>Menu bar icon now adapts to light and dark mode</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/fayazara/Kaze/releases/download/v0.74/Kaze.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="t0/3ThayuMs6LKOEGSMSfSQuSQq8DOyllJeVfvBYRIsvPuMq9BLPNo+tJX+4yt55O79951/fY551ggsbOq9UAg=="
+        length="6494604"
+      />
+    </item>
+
+    <item>
       <title>Version 0.72</title>
       <sparkle:version>4</sparkle:version>
       <sparkle:shortVersionString>0.72</sparkle:shortVersionString>

@@ -133,6 +133,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let overlayState = OverlayState()
     private var statusItem: NSStatusItem?
     private var cancellables = Set<AnyCancellable>()
+    private var appearanceObservation: NSKeyValueObservation?
 
     private var enhancer: TextEnhancer?
     private var settingsWindowController: NSWindowController?
@@ -232,17 +233,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             enhancer = TextEnhancer()
         }
 
-        // Menu bar icon
+        // Menu bar icon — use a dark/light appearance-aware icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        updateStatusBarIcon()
         if let button = statusItem?.button {
-            if let icon = NSImage(named: "kaze-icon") {
-                icon.size = NSSize(width: 18, height: 18)
-                icon.isTemplate = true
-                button.image = icon
-            } else {
-                button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Kaze")
+            appearanceObservation = button.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+                DispatchQueue.main.async {
+                    self?.updateStatusBarIcon()
+                }
             }
-            button.image?.accessibilityDescription = "Kaze"
         }
         buildMenu()
         observedEngineForPreferenceChanges = transcriptionEngine
@@ -279,6 +278,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !storedMicrophone.isEmpty, !isKnownAudioInputDevice(storedMicrophone) {
             defaults.set("", forKey: AppPreferenceKey.selectedMicrophoneID)
         }
+    }
+
+    private func updateStatusBarIcon() {
+        guard let button = statusItem?.button else { return }
+        let isDark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let iconName = isDark ? "kaze-icon" : "kaze-icon-black"
+        if let icon = NSImage(named: iconName) {
+            icon.size = NSSize(width: 18, height: 18)
+            button.image = icon
+        } else {
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Kaze")
+        }
+        button.image?.accessibilityDescription = "Kaze"
     }
 
     private func buildMenu() {
