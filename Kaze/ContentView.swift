@@ -8,12 +8,14 @@ import ServiceManagement
 
 private enum SettingsTab: String, CaseIterable {
     case general
+    case controls
     case vocabulary
     case history
 
     var title: String {
         switch self {
         case .general: return "General"
+        case .controls: return "Controls"
         case .vocabulary: return "Vocabulary"
         case .history: return "History"
         }
@@ -22,6 +24,7 @@ private enum SettingsTab: String, CaseIterable {
     var icon: String {
         switch self {
         case .general: return "gearshape"
+        case .controls: return "slider.horizontal.3"
         case .vocabulary: return "text.book.closed"
         case .history: return "clock.arrow.circlepath"
         }
@@ -54,9 +57,10 @@ struct ContentView: View {
                     GeneralSettingsView(
                         whisperModelManager: whisperModelManager,
                         parakeetModelManager: parakeetModelManager,
-                        qwenModelManager: qwenModelManager,
-                        updaterManager: updaterManager
+                        qwenModelManager: qwenModelManager
                     )
+                case .controls:
+                    ControlsSettingsView(updaterManager: updaterManager)
                 case .vocabulary:
                     VocabularySettingsView(customWordsManager: customWordsManager)
                 case .history:
@@ -106,9 +110,7 @@ private struct GeneralSettingsView: View {
     @AppStorage(AppPreferenceKey.enhancementMode) private var enhancementModeRaw = EnhancementMode.off.rawValue
     @AppStorage(AppPreferenceKey.enhancementSystemPrompt) private var systemPrompt = AppPreferenceKey.defaultEnhancementPrompt
     @AppStorage(AppPreferenceKey.hotkeyMode) private var hotkeyModeRaw = HotkeyMode.holdToTalk.rawValue
-    @AppStorage(AppPreferenceKey.notchMode) private var notchMode = true
     @AppStorage(AppPreferenceKey.selectedMicrophoneID) private var selectedMicrophoneID = ""
-    @AppStorage(AppPreferenceKey.appendTrailingSpace) private var appendTrailingSpace = false
     @State private var hotkeyShortcut = HotkeyShortcut.loadFromDefaults()
     @State private var isRecordingHotkey = false
     @State private var hotkeyMonitor: Any?
@@ -119,7 +121,6 @@ private struct GeneralSettingsView: View {
     @ObservedObject var whisperModelManager: WhisperModelManager
     @ObservedObject var parakeetModelManager: FluidAudioModelManager
     @ObservedObject var qwenModelManager: FluidAudioModelManager
-    @ObservedObject var updaterManager: UpdaterManager
 
     private var selectedEngine: TranscriptionEngine {
         TranscriptionEngine(rawValue: engineRaw) ?? .dictation
@@ -149,6 +150,7 @@ private struct GeneralSettingsView: View {
     }
 
     var body: some View {
+        ScrollView {
         VStack(spacing: 0) {
             // MARK: Transcription
             formRow("Transcription engine:") {
@@ -318,83 +320,10 @@ private struct GeneralSettingsView: View {
                 }
             }
 
-            sectionDivider()
-
-            // MARK: Appearance
-            formRow("Notch mode:") {
-                Toggle(isOn: $notchMode) {
-                    Text("Dynamic Island style")
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            }
-
-            formRow("") {
-                Text("Show the recording indicator at the top of the screen, like a Dynamic Island around the MacBook notch. When off, a floating pill appears at the bottom.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            sectionDivider()
-
-            // MARK: Output
-            formRow("Trailing space:") {
-                Toggle(isOn: $appendTrailingSpace) {
-                    Text("Append a space after each transcription")
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            }
-
-            sectionDivider()
-
-            // MARK: System
-            formRow("Launch at login:") {
-                Toggle(isOn: Binding(
-                    get: { SMAppService.mainApp.status == .enabled },
-                    set: { newValue in
-                        do {
-                            if newValue {
-                                try SMAppService.mainApp.register()
-                            } else {
-                                try SMAppService.mainApp.unregister()
-                            }
-                        } catch {
-                            print("Launch at login toggle failed: \(error)")
-                        }
-                    }
-                )) {
-                    Text("Start Kaze when you log in")
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            }
-
-            sectionDivider()
-
-            // MARK: Updates
-            formRow("Auto-update:") {
-                Toggle(isOn: Binding(
-                    get: { updaterManager.automaticallyChecksForUpdates },
-                    set: { updaterManager.automaticallyChecksForUpdates = $0 }
-                )) {
-                    Text("Automatically check for updates")
-                }
-                .toggleStyle(.switch)
-                .controlSize(.small)
-            }
-
-            formRow("") {
-                Button("Check for Updates…") {
-                    updaterManager.checkForUpdates()
-                }
-                .controlSize(.small)
-                .disabled(!updaterManager.canCheckForUpdates)
-            }
-
             Spacer(minLength: 20)
         }
         .padding(.top, 12)
+        }
         .onDisappear {
             stopHotkeyRecording()
             audioDeviceObserver.stop()
@@ -709,6 +638,93 @@ private struct GeneralSettingsView: View {
     }
 
 
+}
+
+// MARK: - Controls Settings Tab
+
+private struct ControlsSettingsView: View {
+    @AppStorage(AppPreferenceKey.notchMode) private var notchMode = true
+    @AppStorage(AppPreferenceKey.appendTrailingSpace) private var appendTrailingSpace = false
+    @ObservedObject var updaterManager: UpdaterManager
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // MARK: System
+            formRow("Launch at login:") {
+                Toggle(isOn: Binding(
+                    get: { SMAppService.mainApp.status == .enabled },
+                    set: { newValue in
+                        do {
+                            if newValue {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            print("Launch at login toggle failed: \(error)")
+                        }
+                    }
+                )) {
+                    Text("Start Kaze when you log in")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            sectionDivider()
+
+            // MARK: Output
+            formRow("Trailing space:") {
+                Toggle(isOn: $appendTrailingSpace) {
+                    Text("Append a space after each transcription")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            sectionDivider()
+
+            // MARK: Appearance
+            formRow("Notch mode:") {
+                Toggle(isOn: $notchMode) {
+                    Text("Dynamic Island style")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            formRow("") {
+                Text("Show the recording indicator at the top of the screen, like a Dynamic Island around the MacBook notch. When off, a floating pill appears at the bottom.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            sectionDivider()
+
+            // MARK: Updates
+            formRow("Auto-update:") {
+                Toggle(isOn: Binding(
+                    get: { updaterManager.automaticallyChecksForUpdates },
+                    set: { updaterManager.automaticallyChecksForUpdates = $0 }
+                )) {
+                    Text("Automatically check for updates")
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
+
+            formRow("") {
+                Button("Check for Updates…") {
+                    updaterManager.checkForUpdates()
+                }
+                .controlSize(.small)
+                .disabled(!updaterManager.canCheckForUpdates)
+            }
+
+            Spacer()
+        }
+        .padding(.top, 12)
+    }
 }
 
 // MARK: - History Tab

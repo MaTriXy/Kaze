@@ -108,7 +108,7 @@ struct KazeApp: App {
                 customWordsManager: appDelegate.customWordsManager,
                 updaterManager: appDelegate.updaterManager
             )
-            .frame(minWidth: 480, maxWidth: 520)
+            .frame(width: 520, height: 600)
         }
     }
 }
@@ -426,7 +426,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             customWordsManager: customWordsManager,
             updaterManager: updaterManager
         )
-        .frame(minWidth: 480, maxWidth: 520)
+        .frame(width: 520, height: 600)
         let hostingController = NSHostingController(rootView: contentView)
 
         let window = NSWindow(

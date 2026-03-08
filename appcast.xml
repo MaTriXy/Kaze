@@ -20,6 +20,28 @@
     -->
 
     <item>
+      <title>Version 0.75</title>
+      <sparkle:version>6</sparkle:version>
+      <sparkle:shortVersionString>0.75</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <pubDate>Sun, 08 Mar 2026 20:30:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 0.75</h2>
+        <ul>
+          <li>New Controls tab in Settings for Launch at login, Trailing space, Notch mode, and Updates</li>
+          <li>Settings window is now a fixed 600px height with proper scrolling</li>
+          <li>Adaptive menu bar icon for light and dark mode</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/fayazara/Kaze/releases/download/v0.75/Kaze.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="Il3WYIeyQij1MgTr2xTWSUcA/PsQl3PZft4nPpt7/0OArKSLMJ+PPdL3h1kulXJHnSOWjs/b9ywJDkvzEKOXDA=="
+        length="6499874"
+      />
+    </item>
+
+    <item>
       <title>Version 0.74</title>
       <sparkle:version>5</sparkle:version>
       <sparkle:shortVersionString>0.74</sparkle:shortVersionString>
