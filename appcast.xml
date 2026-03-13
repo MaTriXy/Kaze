@@ -20,6 +20,27 @@
     -->
 
     <item>
+      <title>Version 0.77</title>
+      <sparkle:version>8</sparkle:version>
+      <sparkle:shortVersionString>0.77</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <pubDate>Thu, 13 Mar 2026 12:00:00 +0000</pubDate>
+      <description><![CDATA[
+        <h2>What's New in 0.77</h2>
+        <ul>
+          <li>Fixed extreme CPU usage caused by status bar icon KVO feedback loop</li>
+          <li>Optimized keyboard event tap with listen-only mode and early filtering</li>
+        </ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/fayazara/Kaze/releases/download/v0.77/Kaze.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="ZYqZnAHTPYzU9z2iRXt0eRbzq3LDak2sVAsCIuF5lNgHwn23fIyyeg2+W+T7SCXJxaxwaLLkRaD1WdrPlRx9Bw=="
+        length="6571464"
+      />
+    </item>
+
+    <item>
       <title>Version 0.76</title>
       <sparkle:version>7</sparkle:version>
       <sparkle:shortVersionString>0.76</sparkle:shortVersionString>
